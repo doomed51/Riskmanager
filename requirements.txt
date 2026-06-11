@@ -2,3 +2,4 @@ ib_async
 polars
 requests
 QuantLib
+beautifulsoup4
