@@ -1,0 +1,31 @@
+IB_HOST = "127.0.0.1"
+IB_PORT = <INSERT PORT> 
+CLIENT_ID = <INSERT CLIENT ID> 
+
+ENRICHED_PORTFOLIO_CSV_PATH = "data/enriched_portfolio_history.csv"
+
+# DTE sleeve boundaries for strategy views.
+SHORT_SLEEVE_MAX_DTE = 50
+LONG_SLEEVE_MIN_DTE = 90
+
+# Roll-readiness alert thresholds.
+SHORT_ROLL_ALERT_DTE = 14
+LONG_ROLL_ALERT_DTE = 120
+
+# Greeks behavior: "ib", "black_scholes", or "hybrid".
+GREEKS_MODE = "hybrid"
+PRICING_BACKEND = "quantlib"
+DEFAULT_RISK_FREE_RATE = 0.03
+DEFAULT_IMPLIED_VOL = 0.25
+DEFAULT_MULTIPLIER = 100.0
+
+# Scenario defaults for IBKR-style Relative P&L graphing.
+SCENARIO_PRICE_SHOCK_MIN_PCT = -10
+SCENARIO_PRICE_SHOCK_MAX_PCT = 10
+SCENARIO_PRICE_SHOCK_STEP_PCT = 1
+SCENARIO_VOL_SHOCK_MIN_PTS = -10
+SCENARIO_VOL_SHOCK_MAX_PTS = 10
+SCENARIO_VOL_SHOCK_STEP_PTS = 2
+
+
+EXCLUSION_LIST = ["AAPL"]
