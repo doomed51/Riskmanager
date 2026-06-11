@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, date
 
 import polars as pl
 import ib_async as ib 
@@ -47,6 +48,15 @@ async def get_positions_from_ib() -> pl.DataFrame:
     contract_df = pl.DataFrame(contract_dicts, infer_schema_length=len(contract_dicts))
     positions_df = positions_df.hstack(contract_df)
 
+    # add dte column 
+    positions_df = positions_df.with_columns(
+        pl.col("lastTradeDateOrContractMonth")
+        .str.strptime(pl.Date, format="%Y%m%d", strict=False)
+        .alias("lastTradeDateOrContractMonth")
+    ).with_columns(
+        dte = (pl.col("lastTradeDateOrContractMonth") - pl.lit(date.today())).dt.total_days().alias("dte")
+    )
+
     return positions_df
 
 
@@ -63,6 +73,8 @@ async def get_option_greek_snapshots(contracts: list) -> pl.DataFrame:
         return pl.DataFrame(
             {
                 "conId": [],
+                "ib_delta": [],
+                "ib_gamma": [],
                 "ib_vega": [],
                 "ib_theta": [],
                 "ib_iv": [],
@@ -83,6 +95,8 @@ async def get_option_greek_snapshots(contracts: list) -> pl.DataFrame:
         return pl.DataFrame(
             {
                 "conId": [],
+                "ib_delta": [],
+                "ib_gamma": [],
                 "ib_vega": [],
                 "ib_theta": [],
                 "ib_iv": [],
@@ -104,6 +118,8 @@ async def get_option_greek_snapshots(contracts: list) -> pl.DataFrame:
         rows.append(
             {
                 "conId": getattr(contract, "conId", None),
+                "ib_delta": getattr(model_greeks, "delta", None) if model_greeks else None,
+                "ib_gamma": getattr(model_greeks, "gamma", None) if model_greeks else None,
                 "ib_vega": getattr(model_greeks, "vega", None) if model_greeks else None,
                 "ib_theta": getattr(model_greeks, "theta", None) if model_greeks else None,
                 "ib_iv": getattr(model_greeks, "impliedVol", None) if model_greeks else None,
@@ -118,6 +134,8 @@ async def get_option_greek_snapshots(contracts: list) -> pl.DataFrame:
         return pl.DataFrame(
             {
                 "conId": [],
+                "ib_delta": [],
+                "ib_gamma": [],
                 "ib_vega": [],
                 "ib_theta": [],
                 "ib_iv": [],
