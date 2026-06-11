@@ -1,6 +1,6 @@
 # Risk Manager
 
-Analyze current portfolio risk of an options portfolio. 
+This tool helps keep tabs on the risk profile of a short/long options book. 
 
 ### Features 
 - Outputs net vega and theta normalized for contract size 
