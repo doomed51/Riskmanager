@@ -115,6 +115,53 @@ def black_scholes_theta(
     # Return theta per day to align with common trading convention used in this repo.
     return annual_theta / 365.0
 
+def black_scholes_delta(
+    option_right: str,
+    spot: float,
+    strike: float,
+    dte_days: float,
+    rate: float,
+    vol: float,
+) -> Optional[float]:
+    if spot <= 0 or strike <= 0 or dte_days <= 0 or vol <= 0:
+        return None
+
+    built = _build_european_option(option_right=option_right, strike=strike, dte_days=dte_days)
+    if built is None:
+        return None
+
+    option, eval_date = built
+    process = _build_bsm_process(eval_date=eval_date, spot=spot, rate=rate, vol=vol)
+    option.setPricingEngine(ql.AnalyticEuropeanEngine(process))
+
+    try:
+        return float(option.delta())
+    except RuntimeError:
+        return None
+
+def black_scholes_gamma(
+    option_right: str,
+    spot: float,
+    strike: float,
+    dte_days: float,
+    rate: float,
+    vol: float,
+) -> Optional[float]:
+    if spot <= 0 or strike <= 0 or dte_days <= 0 or vol <= 0:
+        return None
+
+    built = _build_european_option(option_right=option_right, strike=strike, dte_days=dte_days)
+    if built is None:
+        return None
+
+    option, eval_date = built
+    process = _build_bsm_process(eval_date=eval_date, spot=spot, rate=rate, vol=vol)
+    option.setPricingEngine(ql.AnalyticEuropeanEngine(process))
+
+    try:
+        return float(option.gamma())
+    except RuntimeError:
+        return None
 
 def choose_preferred_greek(
     ib_value: Optional[float],
