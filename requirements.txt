@@ -3,3 +3,4 @@ polars
 requests
 QuantLib
 beautifulsoup4
+numpy
