@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
+import numpy as np
 
 import polars as pl
 
@@ -196,6 +197,57 @@ def _calc_fallback_theta(row: dict, risk_free_rate: float, default_iv: float) ->
         vol=vol,
     )
 
+def _calc_fallback_delta(row:dict, risk_free_rate: float, default_iv: float) -> Optional[float]:
+    right = row.get("right")
+    strike = _to_float_or_none(row.get("strike"))
+    dte = _to_float_or_none(row.get("dte"))
+    spot = _to_float_or_none(row.get("ib_underlying_price"))
+    vol = _to_float_or_none(row.get("ib_iv"))
+
+    if vol is None:
+        vol = default_iv
+
+    if spot is None and strike is not None:
+        # Offline approximation when underlying price is unavailable.
+        spot = strike
+
+    if spot is None or strike is None or dte is None:
+        return None
+
+    return greeks.black_scholes_delta(
+        option_right=right,
+        spot=spot,
+        strike=strike,
+        dte_days=dte,
+        rate=risk_free_rate,
+        vol=vol,
+    )
+
+def _calc_fallback_gamma(row:dict, risk_free_rate: float, default_iv: float) -> Optional[float]:
+    right = row.get("right")
+    strike = _to_float_or_none(row.get("strike"))
+    dte = _to_float_or_none(row.get("dte"))
+    spot = _to_float_or_none(row.get("ib_underlying_price"))
+    vol = _to_float_or_none(row.get("ib_iv"))
+
+    if vol is None:
+        vol = default_iv
+
+    if spot is None and strike is not None:
+        # Offline approximation when underlying price is unavailable.
+        spot = strike
+
+    if spot is None or strike is None or dte is None:
+        return None
+
+    return greeks.black_scholes_gamma(
+        option_right=right,
+        spot=spot,
+        strike=strike,
+        dte_days=dte,
+        rate=risk_free_rate,
+        vol=vol,
+    )
 
 def build_enriched_portfolio(
     positions_df: pl.DataFrame,
@@ -234,17 +286,19 @@ def build_enriched_portfolio(
         df = df.join(greek_snapshots, on="conId", how="left")
     else:
         df = df.with_columns(
+            pl.lit(None).cast(pl.Float64).alias("ib_delta"),
+            pl.lit(None).cast(pl.Float64).alias("ib_gamma"),
             pl.lit(None).cast(pl.Float64).alias("ib_vega"),
             pl.lit(None).cast(pl.Float64).alias("ib_theta"),
             pl.lit(None).cast(pl.Float64).alias("ib_iv"),
             pl.lit(None).cast(pl.Float64).alias("ib_underlying_price"),
         )
 
-    # calculate dte and position side 
+    # calculate  position side 
     df = df.with_columns(
-        pl.col("lastTradeDateOrContractMonth")
-        .map_elements(lambda x: _calc_dte(x, as_of), return_dtype=pl.Int64)
-        .alias("dte"),
+        # pl.col("lastTradeDateOrContractMonth")
+        # .map_elements(lambda x: _calc_dte(x, as_of), return_dtype=pl.Int64)
+        # .alias("dte"),
         pl.when(pl.col("position") > 0).then(pl.lit("LONG")).otherwise(pl.lit("SHORT")).alias("position_side"),
     )
 
@@ -264,6 +318,12 @@ def build_enriched_portfolio(
         pl.struct(["right", "strike", "dte", "ib_underlying_price", "ib_iv"])
         .map_elements(lambda row: _calc_fallback_theta(row, risk_free_rate, default_iv), return_dtype=pl.Float64)
         .alias("fallback_theta"),
+        pl.struct(["right", "strike", "dte", "ib_underlying_price", "ib_iv"])
+        .map_elements(lambda row: _calc_fallback_delta(row, risk_free_rate, default_iv), return_dtype=pl.Float64)
+        .alias("fallback_delta"),
+        pl.struct(["right", "strike", "dte", "ib_underlying_price", "ib_iv"])
+        .map_elements(lambda row: _calc_fallback_gamma(row, risk_free_rate, default_iv), return_dtype=pl.Float64)
+        .alias("fallback_gamma"),
     )
 
     mode_lower = (greeks_mode or "hybrid").lower()
@@ -277,6 +337,14 @@ def build_enriched_portfolio(
             lambda row: greeks.choose_preferred_greek(row.get("ib_theta"), row.get("fallback_theta"), mode_lower),
             return_dtype=pl.Float64,
         ).alias("theta_per_contract"),
+        pl.struct(["ib_delta", "fallback_delta"]).map_elements(
+            lambda row: greeks.choose_preferred_greek(row.get("ib_delta"), row.get("fallback_delta"), mode_lower),
+            return_dtype=pl.Float64,
+        ).alias("delta_per_contract"),
+        pl.struct(["ib_gamma", "fallback_gamma"]).map_elements(
+            lambda row: greeks.choose_preferred_greek(row.get("ib_gamma"), row.get("fallback_gamma"), mode_lower),
+            return_dtype=pl.Float64,
+        ).alias("gamma_per_contract"),
     )
 
     # populate greek source metadata 
@@ -284,6 +352,8 @@ def build_enriched_portfolio(
         df = df.with_columns(
             pl.when(pl.col("ib_vega").is_not_null()).then(pl.lit("IB")).otherwise(pl.lit("MISSING")).alias("greek_source_vega"),
             pl.when(pl.col("ib_theta").is_not_null()).then(pl.lit("IB")).otherwise(pl.lit("MISSING")).alias("greek_source_theta"),
+            pl.when(pl.col("ib_delta").is_not_null()).then(pl.lit("IB")).otherwise(pl.lit("MISSING")).alias("greek_source_delta"),
+            pl.when(pl.col("ib_gamma").is_not_null()).then(pl.lit("IB")).otherwise(pl.lit("MISSING")).alias("greek_source_gamma"),
         )
     elif mode_lower == "black_scholes":
         df = df.with_columns(
@@ -295,6 +365,14 @@ def build_enriched_portfolio(
             .then(pl.lit("FALLBACK"))
             .otherwise(pl.lit("MISSING"))
             .alias("greek_source_theta"),
+            pl.when(pl.col("fallback_delta").is_not_null())
+            .then(pl.lit("FALLBACK"))
+            .otherwise(pl.lit("MISSING"))
+            .alias("greek_source_delta"),
+            pl.when(pl.col("fallback_gamma").is_not_null())
+            .then(pl.lit("FALLBACK"))
+            .otherwise(pl.lit("MISSING"))
+            .alias("greek_source_gamma"),
         )
     else:
         df = df.with_columns(
@@ -310,22 +388,43 @@ def build_enriched_portfolio(
             .then(pl.lit("FALLBACK"))
             .otherwise(pl.lit("MISSING"))
             .alias("greek_source_theta"),
+            pl.when(pl.col("ib_delta").is_not_null())
+            .then(pl.lit("IB"))
+            .when(pl.col("fallback_delta").is_not_null())
+            .then(pl.lit("FALLBACK"))
+            .otherwise(pl.lit("MISSING"))
+            .alias("greek_source_delta"),
+            pl.when(pl.col("ib_gamma").is_not_null())
+            .then(pl.lit("IB"))
+            .when(pl.col("fallback_gamma").is_not_null())
+            .then(pl.lit("FALLBACK"))
+            .otherwise(pl.lit("MISSING"))
+            .alias("greek_source_gamma"),
         )
 
     df = df.with_columns(
-        pl.when((pl.col("greek_source_vega") == pl.lit("IB")) & (pl.col("greek_source_theta") == pl.lit("IB")))
+        pl.when((pl.col("greek_source_vega") == pl.lit("IB")) & (pl.col("greek_source_theta") == pl.lit("IB")) & (pl.col("greek_source_delta") == pl.lit("IB")) & (pl.col("greek_source_gamma") == pl.lit("IB")))
         .then(pl.lit("HIGH"))
-        .when((pl.col("greek_source_vega") == pl.lit("MISSING")) | (pl.col("greek_source_theta") == pl.lit("MISSING")))
+        .when((pl.col("greek_source_vega") == pl.lit("MISSING")) | (pl.col("greek_source_theta") == pl.lit("MISSING")) | (pl.col("greek_source_delta") == pl.lit("MISSING")) | (pl.col("greek_source_gamma") == pl.lit("MISSING")))
         .then(pl.lit("LOW"))
         .otherwise(pl.lit("MEDIUM"))
         .alias("greek_quality")
+    )
+
+    # normalize vega by dte
+    df = df.with_columns(
+        pl.when(pl.col("dte") > 0).then(pl.col("vega_per_contract") * np.sqrt(config.VEGA_DTE_NORMALIZATION_TARGET / pl.col("dte"))).otherwise(pl.col("vega_per_contract")).alias("dte_normalized_vega_per_contract")
+        # pl.lit(0.0).alias("dte_normalized_vega_per_contract")
     )
 
 
     # calculate position size and multiplier adjusted greeks  
     df = df.with_columns(
         (pl.col("vega_per_contract") * pl.col("position") * pl.col("multiplier")).fill_null(0.0).alias("net_vega"),
+        (pl.col("dte_normalized_vega_per_contract") * pl.col("position") * pl.col("multiplier")).fill_null(0.0).alias("net_dte_normalized_vega"),
         (pl.col("theta_per_contract") * pl.col("position") * pl.col("multiplier")).fill_null(0.0).alias("net_theta"),
+        (pl.col("delta_per_contract") * pl.col("position") * pl.col("multiplier")).fill_null(0.0).alias("net_delta"),
+        (pl.col("gamma_per_contract") * pl.col("position") * pl.col("multiplier")).fill_null(0.0).alias("net_gamma"),
     )
 
 
@@ -345,6 +444,211 @@ def build_enriched_portfolio(
 
     return df
 
+
+
+def summarize_net_greeks(enriched_portfolio: pl.DataFrame) -> pl.DataFrame:
+    if enriched_portfolio.is_empty():
+        return pl.DataFrame(
+            {
+                "segment": ["TOTAL"],
+                "positions": [0],
+                "net_vega": [0.0],
+                "net_dte_normalized_vega": [0.0],
+                "net_theta": [0.0],
+                "net_delta": [0.0],
+                "net_gamma": [0.0],
+            }
+        )
+
+    total = enriched_portfolio.select(
+        pl.lit("TOTAL").alias("segment"),
+        pl.len().alias("positions"),
+        pl.col("net_vega").sum().fill_null(0.0).alias("net_vega"),
+        pl.col("net_dte_normalized_vega").sum().fill_null(0.0).alias("net_dte_normalized_vega"),
+        pl.col("net_theta").sum().fill_null(0.0).alias("net_theta"),
+        pl.col("net_delta").sum().fill_null(0.0).alias("net_delta"),
+        pl.col("net_gamma").sum().fill_null(0.0).alias("net_gamma"),
+
+        # normalized vega to 30dte, and then net them out 
+    )
+
+    side = (
+        enriched_portfolio.group_by("position_side")
+        .agg(
+            pl.len().alias("positions"),
+            pl.col("net_vega").sum().fill_null(0.0).alias("net_vega"),
+            pl.col("net_dte_normalized_vega").sum().fill_null(0.0).alias("net_dte_normalized_vega"),
+            pl.col("net_theta").sum().fill_null(0.0).alias("net_theta"),
+            pl.col("net_delta").sum().fill_null(0.0).alias("net_delta"),
+            pl.col("net_gamma").sum().fill_null(0.0).alias("net_gamma"),
+        )
+        .with_columns((pl.lit("SIDE_") + pl.col("position_side")).alias("segment"))
+        .select(["segment", "positions", "net_vega", "net_dte_normalized_vega", "net_theta", "net_delta", "net_gamma"])
+    )
+
+    sleeve = (
+        enriched_portfolio.group_by("sleeve")
+        .agg(
+            pl.len().alias("positions"),
+            pl.col("net_vega").sum().fill_null(0.0).alias("net_vega"),
+            pl.col("net_dte_normalized_vega").sum().fill_null(0.0).alias("net_dte_normalized_vega"),
+            pl.col("net_theta").sum().fill_null(0.0).alias("net_theta"),
+            pl.col("net_delta").sum().fill_null(0.0).alias("net_delta"),
+            pl.col("net_gamma").sum().fill_null(0.0).alias("net_gamma"),
+        )
+        .with_columns((pl.lit("SLEEVE_") + pl.col("sleeve")).alias("segment"))
+        .select(["segment", "positions", "net_vega", "net_dte_normalized_vega", "net_theta", "net_delta", "net_gamma"])
+    )
+
+    return pl.concat([total, side, sleeve], how="vertical")
+
+
+def summarize_consolidated_long_portfolio(df: pl.DataFrame) -> pl.DataFrame:
+    return (
+        df.filter(pl.col("sleeve") == "LONG_CRASH")
+        .group_by(["symbol", "dte_bucket"])
+        .agg(
+            pl.len().alias("positions"),
+            pl.col("net_vega").sum().fill_null(0.0).alias("net_vega"),
+            pl.col("net_dte_normalized_vega").sum().fill_null(0.0).alias("net_dte_normalized_vega"),
+            pl.col("net_theta").sum().fill_null(0.0).alias("net_theta"),
+            pl.col("net_delta").sum().fill_null(0.0).alias("net_delta"),
+            pl.col("net_gamma").sum().fill_null(0.0).alias("net_gamma"),
+        )
+        .sort(["symbol", "dte_bucket"])
+    )
+
+
+def summarize_consolidated_short_portfolio(df: pl.DataFrame) -> pl.DataFrame:
+    return (
+        df.filter(pl.col("sleeve") == "SHORT_VRP")
+        .group_by(["symbol", "dte_bucket"])
+        .agg(
+            pl.len().alias("positions"),
+            pl.col("net_vega").sum().fill_null(0.0).alias("net_vega"),
+            pl.col("net_dte_normalized_vega").sum().fill_null(0.0).alias("net_dte_normalized_vega"),
+            pl.col("net_theta").sum().fill_null(0.0).alias("net_theta"),
+            pl.col("net_delta").sum().fill_null(0.0).alias("net_delta"),
+            pl.col("net_gamma").sum().fill_null(0.0).alias("net_gamma"),
+        )
+        .sort(["symbol", "dte_bucket"])
+    )
+
+
+def roll_readiness_view(df: pl.DataFrame) -> pl.DataFrame:
+    return (
+        df.select(
+            [
+                "symbol",
+                "secType",
+                "right",
+                "strike",
+                "lastTradeDateOrContractMonth",
+                "dte",
+                "dte_bucket",
+                "position",
+                "multiplier",
+                "sleeve",
+                "greek_source_vega",
+                "greek_source_theta",
+                "greek_quality",
+                "net_vega",
+                "net_dte_normalized_vega",
+                "net_theta",
+                "net_delta",
+                "net_gamma",
+                "roll_candidate_short",
+                "roll_candidate_long",
+            ]
+        )
+        .sort(["sleeve", "dte", "symbol"])
+    )
+
+
+def persist_enriched_portfolio_csv(
+    enriched_portfolio: pl.DataFrame,
+    output_path: Optional[str] = None,
+    snapshot_time: Optional[datetime] = None,
+) -> Path:
+    """
+    Append the enriched portfolio snapshot to a persistent CSV for later analysis.
+    Adds snapshot_date and snapshot_timestamp columns to every saved row.
+    """
+    path = Path(output_path or ENRICHED_PORTFOLIO_CSV_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if enriched_portfolio.is_empty():
+        return path
+
+    captured_at = snapshot_time or datetime.now()
+    snapshot_df = enriched_portfolio.with_columns(
+        pl.lit(captured_at.date().isoformat()).alias("snapshot_date"),
+        pl.lit(captured_at.strftime("%Y-%m-%d %H:%M")).alias("snapshot_timestamp"),
+    )
+
+    # drop the contract column 
+    if "contract" in snapshot_df.columns:
+        snapshot_df = snapshot_df.drop(["contract", "comboLegs"])
+
+    if path.exists() and path.stat().st_size > 0:
+        existing = pl.read_csv(path)
+        pl.concat([existing, snapshot_df], how="diagonal_relaxed").write_csv(path)
+    else:
+        snapshot_df.write_csv(path)
+
+    return path
+
+
+def load_enriched_portfolio_csv_history(input_path: Optional[str] = None) -> pl.DataFrame:
+    """
+    Load previously persisted enriched portfolio snapshots.
+    """
+    path = Path(input_path or ENRICHED_PORTFOLIO_CSV_PATH)
+    if not path.exists() or path.stat().st_size == 0:
+        return pl.DataFrame()
+
+    df = pl.read_csv(path)
+
+    # convert snapshot_date and snapshot_timestamp back to datetime types
+    if "snapshot_date" in df.columns:
+        df = df.with_columns(pl.col("snapshot_date").str.strptime(pl.Date, "%Y-%m-%d").alias("snapshot_date"))
+    if "snapshot_timestamp" in df.columns:
+        df = df.with_columns(pl.col("snapshot_timestamp").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M").alias("snapshot_timestamp"))
+
+
+    # Rebuild real IB contracts for downstream workflows that expect Option/FuturesOption objects.
+    if "contract" not in df.columns and "secType" in df.columns:
+        contract_fields = [
+            col
+            for col in [
+                "conId",
+                "symbol",
+                "secType",
+                "exchange",
+                "currency",
+                "lastTradeDateOrContractMonth",
+                "right",
+                "strike",
+                "multiplier",
+                "localSymbol",
+                "tradingClass",
+            ]
+            if col in df.columns
+        ]
+        df = df.with_columns(
+            pl.struct(contract_fields)
+            .map_elements(_build_ib_contract_from_row, return_dtype=pl.Object)
+            .alias("contract")
+        )
+
+    return df
+
+
+
+
+####
+# _________________________________________________________ SCENARIO ANALYTICS _________________________________________________________
+####
 
 def _default_price_shocks_pct() -> list[float]:
     min_pct = SCENARIO_PRICE_SHOCK_MIN_PCT
@@ -509,176 +813,3 @@ def scenario_vol_slices(surface: pl.DataFrame, selected_price_shocks_pct: list[f
     )
 
 
-def summarize_net_greeks(enriched_portfolio: pl.DataFrame) -> pl.DataFrame:
-    if enriched_portfolio.is_empty():
-        return pl.DataFrame(
-            {
-                "segment": ["TOTAL"],
-                "positions": [0],
-                "net_vega": [0.0],
-                "net_theta": [0.0],
-            }
-        )
-
-    total = enriched_portfolio.select(
-        pl.lit("TOTAL").alias("segment"),
-        pl.len().alias("positions"),
-        pl.col("net_vega").sum().fill_null(0.0).alias("net_vega"),
-        pl.col("net_theta").sum().fill_null(0.0).alias("net_theta"),
-    )
-
-    side = (
-        enriched_portfolio.group_by("position_side")
-        .agg(
-            pl.len().alias("positions"),
-            pl.col("net_vega").sum().fill_null(0.0).alias("net_vega"),
-            pl.col("net_theta").sum().fill_null(0.0).alias("net_theta"),
-        )
-        .with_columns((pl.lit("SIDE_") + pl.col("position_side")).alias("segment"))
-        .select(["segment", "positions", "net_vega", "net_theta"])
-    )
-
-    sleeve = (
-        enriched_portfolio.group_by("sleeve")
-        .agg(
-            pl.len().alias("positions"),
-            pl.col("net_vega").sum().fill_null(0.0).alias("net_vega"),
-            pl.col("net_theta").sum().fill_null(0.0).alias("net_theta"),
-        )
-        .with_columns((pl.lit("SLEEVE_") + pl.col("sleeve")).alias("segment"))
-        .select(["segment", "positions", "net_vega", "net_theta"])
-    )
-
-    return pl.concat([total, side, sleeve], how="vertical")
-
-
-def summarize_consolidated_long_portfolio(df: pl.DataFrame) -> pl.DataFrame:
-    return (
-        df.filter(pl.col("sleeve") == "LONG_CRASH")
-        .group_by(["symbol", "dte_bucket"])
-        .agg(
-            pl.len().alias("positions"),
-            pl.col("net_vega").sum().fill_null(0.0).alias("net_vega"),
-            pl.col("net_theta").sum().fill_null(0.0).alias("net_theta"),
-        )
-        .sort(["symbol", "dte_bucket"])
-    )
-
-
-def summarize_consolidated_short_portfolio(df: pl.DataFrame) -> pl.DataFrame:
-    return (
-        df.filter(pl.col("sleeve") == "SHORT_VRP")
-        .group_by(["symbol", "dte_bucket"])
-        .agg(
-            pl.len().alias("positions"),
-            pl.col("net_vega").sum().fill_null(0.0).alias("net_vega"),
-            pl.col("net_theta").sum().fill_null(0.0).alias("net_theta"),
-        )
-        .sort(["symbol", "dte_bucket"])
-    )
-
-
-def roll_readiness_view(df: pl.DataFrame) -> pl.DataFrame:
-    return (
-        df.select(
-            [
-                "symbol",
-                "secType",
-                "right",
-                "strike",
-                "lastTradeDateOrContractMonth",
-                "dte",
-                "dte_bucket",
-                "position",
-                "multiplier",
-                "sleeve",
-                "greek_source_vega",
-                "greek_source_theta",
-                "greek_quality",
-                "net_vega",
-                "net_theta",
-                "roll_candidate_short",
-                "roll_candidate_long",
-            ]
-        )
-        .sort(["sleeve", "dte", "symbol"])
-    )
-
-
-def persist_enriched_portfolio_csv(
-    enriched_portfolio: pl.DataFrame,
-    output_path: Optional[str] = None,
-    snapshot_time: Optional[datetime] = None,
-) -> Path:
-    """
-    Append the enriched portfolio snapshot to a persistent CSV for later analysis.
-    Adds snapshot_date and snapshot_timestamp columns to every saved row.
-    """
-    path = Path(output_path or ENRICHED_PORTFOLIO_CSV_PATH)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    if enriched_portfolio.is_empty():
-        return path
-
-    captured_at = snapshot_time or datetime.now()
-    snapshot_df = enriched_portfolio.with_columns(
-        pl.lit(captured_at.date().isoformat()).alias("snapshot_date"),
-        pl.lit(captured_at.strftime("%Y-%m-%d %H:%M")).alias("snapshot_timestamp"),
-    )
-
-    # drop the contract column 
-    if "contract" in snapshot_df.columns:
-        snapshot_df = snapshot_df.drop(["contract", "comboLegs"])
-
-    if path.exists() and path.stat().st_size > 0:
-        existing = pl.read_csv(path)
-        pl.concat([existing, snapshot_df], how="diagonal_relaxed").write_csv(path)
-    else:
-        snapshot_df.write_csv(path)
-
-    return path
-
-
-def load_enriched_portfolio_csv_history(input_path: Optional[str] = None) -> pl.DataFrame:
-    """
-    Load previously persisted enriched portfolio snapshots.
-    """
-    path = Path(input_path or ENRICHED_PORTFOLIO_CSV_PATH)
-    if not path.exists() or path.stat().st_size == 0:
-        return pl.DataFrame()
-
-    df = pl.read_csv(path)
-
-    # convert snapshot_date and snapshot_timestamp back to datetime types
-    if "snapshot_date" in df.columns:
-        df = df.with_columns(pl.col("snapshot_date").str.strptime(pl.Date, "%Y-%m-%d").alias("snapshot_date"))
-    if "snapshot_timestamp" in df.columns:
-        df = df.with_columns(pl.col("snapshot_timestamp").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M").alias("snapshot_timestamp"))
-
-
-    # Rebuild real IB contracts for downstream workflows that expect Option/FuturesOption objects.
-    if "contract" not in df.columns and "secType" in df.columns:
-        contract_fields = [
-            col
-            for col in [
-                "conId",
-                "symbol",
-                "secType",
-                "exchange",
-                "currency",
-                "lastTradeDateOrContractMonth",
-                "right",
-                "strike",
-                "multiplier",
-                "localSymbol",
-                "tradingClass",
-            ]
-            if col in df.columns
-        ]
-        df = df.with_columns(
-            pl.struct(contract_fields)
-            .map_elements(_build_ib_contract_from_row, return_dtype=pl.Object)
-            .alias("contract")
-        )
-
-    return df
