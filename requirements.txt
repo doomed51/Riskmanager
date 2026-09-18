@@ -4,3 +4,5 @@ requests
 QuantLib
 beautifulsoup4
 numpy
+streamlit
+matplotlib
