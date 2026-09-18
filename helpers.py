@@ -6,6 +6,9 @@ import ib_async as ib
 import config 
 from bs4 import BeautifulSoup
 import requests 
+from app_logging import get_logger, log
+
+LOGGER = get_logger(__name__)
 
 def get_sofr_from_fred() -> float:
     url = "https://fred.stlouisfed.org/series/SOFR"
@@ -36,7 +39,9 @@ async def get_positions_from_ib() -> pl.DataFrame:
 
     # get positions from ib 
     ib_client = ib.IB()
+    log(LOGGER, 20, "ibkr_request", "Requesting current positions", operation="positions", endpoint="reqPositionsAsync", host=_ib_host(), port=_ib_port(), client_id=_client_id())
     await ib_client.connectAsync(_ib_host(), _ib_port(), clientId=_client_id())
+    log(LOGGER, 20, "ibkr_request", "Calling IBKR endpoint", operation="positions", endpoint="reqPositionsAsync")
     positions = await ib_client.reqPositionsAsync()
     ib_client.disconnect() 
 
@@ -86,9 +91,11 @@ async def get_option_greek_snapshots(contracts: list) -> pl.DataFrame:
         )
 
     ib_client = ib.IB()
+    log(LOGGER, 20, "ibkr_request", "Qualifying option contracts", operation="live_market_data", endpoint="qualifyContractsAsync", contract_count=len(contracts))
     await ib_client.connectAsync(_ib_host(), _ib_port(), clientId=_client_id())
     try:
         qualified_contracts = await ib_client.qualifyContractsAsync(*contracts)
+        log(LOGGER, 20, "ibkr_request", "Requesting live option tickers", operation="live_market_data", endpoint="reqTickersAsync", contract_count=len(qualified_contracts), snapshot=True)
         tickers = await asyncio.wait_for(ib_client.reqTickersAsync(*qualified_contracts), timeout=30.0)
     except TimeoutError:
         ib_client.disconnect()
